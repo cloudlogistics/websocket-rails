@@ -14,7 +14,7 @@ module WebsocketRails
     end
 
     initializer 'websocket_rails.load_event_routes', :before => :preload_frameworks do |app|
-      load "#{Rails.root}/config/events.rb" if File.exists?("#{Rails.root}/config/events.rb")
+      load "#{Rails.root}/config/events.rb" if File.exist?("#{Rails.root}/config/events.rb")
     end
 
     rake_tasks do

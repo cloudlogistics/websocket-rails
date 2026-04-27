@@ -92,7 +92,7 @@ class WebsocketRails::ConfigDeprecationError < StandardError
   end
 end
 
-raise WebsocketRails::ConfigDeprecationError if File.exists?("config/initializers/events.rb")
+raise WebsocketRails::ConfigDeprecationError if File.exist?("config/initializers/events.rb")
 
 
 # Deprecation Notices
