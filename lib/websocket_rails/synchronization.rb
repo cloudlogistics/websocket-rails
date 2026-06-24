@@ -1,6 +1,4 @@
 require "redis"
-require "redis/connection/synchrony"
-require "redis/connection/ruby"
 
 module WebsocketRails
   class Synchronization
@@ -52,7 +50,7 @@ module WebsocketRails
 
     def ruby_redis
       @ruby_redis ||= begin
-        redis_options = WebsocketRails.config.redis_options.merge(:driver => :ruby)
+        redis_options = WebsocketRails.config.redis_options
         Redis.new(redis_options)
       end
     end
@@ -79,13 +77,11 @@ module WebsocketRails
     def synchronize!
       unless @synchronizing
         synchro = Fiber.new do
-          # since puma is EM based it requires synchrony driver to work with it
-          # while sidekiq requires hiredis driver to work with
-          if ENV['POD_TYPE'] == 'background' || Sidekiq.server?
-            # hiredis
-            fiber_redis = Redis.new(WebsocketRails.config.redis_options.merge(driver: :hiredis))
+          # Guard Sidekiq constant — it may not be loaded in all environments
+          sidekiq_server = defined?(Sidekiq) && Sidekiq.respond_to?(:server?) && Sidekiq.server?
+          if ENV['POD_TYPE'] == 'background' || sidekiq_server
+            fiber_redis = Redis.new(WebsocketRails.config.redis_options)
           else
-            # synchrony
             fiber_redis = Redis.new(WebsocketRails.config.redis_options)
           end
 
@@ -117,8 +113,11 @@ module WebsocketRails
 
         @synchronizing = true
 
-        EM.next_tick { synchro.resume }
-
+        if defined?(EM) && EM.reactor_running?
+          EM.next_tick { synchro.resume }
+        else
+          synchro.resume
+        end
         trap('TERM') do
           Thread.new { shutdown! }
         end
@@ -164,7 +163,7 @@ module WebsocketRails
     def remove_server(token)
       ruby_redis.srem "websocket_rails.active_servers", token
       info "Server Removed: #{token}"
-      EM.stop
+      EM.stop if defined?(EM) && EM.reactor_running?
     end
 
     def register_user(connection)

@@ -1,8 +1,10 @@
 require 'faye/websocket'
 require 'rack'
-require 'thin'
 
-Faye::WebSocket.load_adapter('thin')
+# Load the Thin adapter only when Thin is available (not needed under Puma)
+if defined?(Thin)
+  Faye::WebSocket.load_adapter('thin')
+end
 
 module WebsocketRails
   # The +ConnectionManager+ class implements the core Rack application that handles
@@ -11,9 +13,9 @@ module WebsocketRails
 
     include Logging
 
-    SuccessfulResponse = [200,{'Content-Type' => 'text/plain'},['success']].freeze
-    BadRequestResponse = [400,{'Content-Type' => 'text/plain'},['invalid']].freeze
-    ExceptionResponse  = [500,{'Content-Type' => 'text/plain'},['exception']].freeze
+    SuccessfulResponse = [200,{'content-type' => 'text/plain'},['success']].freeze
+    BadRequestResponse = [400,{'content-type' => 'text/plain'},['invalid']].freeze
+    ExceptionResponse  = [500,{'content-type' => 'text/plain'},['exception']].freeze
 
     # Contains a Hash of currently open connections.
     # @return [Hash]
@@ -32,11 +34,15 @@ module WebsocketRails
       @dispatcher  = Dispatcher.new(self)
 
       if WebsocketRails.synchronize?
-        EM.next_tick do
-          Fiber.new {
-            Synchronization.synchronize!
-            EM.add_shutdown_hook { Synchronization.shutdown! }
-          }.resume
+        if defined?(EM) && EM.reactor_running?
+          EM.next_tick do
+            Fiber.new {
+              Synchronization.synchronize!
+              EM.add_shutdown_hook { Synchronization.shutdown! }
+            }.resume
+          end
+        else
+          Rails.logger.warn "[WebsocketRails] Synchronization disabled: EventMachine reactor is not running"
         end
       end
     end

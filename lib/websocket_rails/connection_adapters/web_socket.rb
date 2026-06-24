@@ -13,7 +13,9 @@ module WebsocketRails
         @connection.onerror   = method(:on_error)
         @connection.onclose   = method(:on_close)
         @connection.rack_response
-        EM.next_tick do
+        if defined?(EM) && EM.reactor_running?
+          EM.next_tick { on_open }
+        else
           on_open
         end
       end

@@ -4,8 +4,8 @@ module WebsocketRails
       TERM = "\r\n".freeze
       TAIL = "0#{TERM}#{TERM}".freeze
       HttpHeaders = {
-        'Content-Type'      => 'text/json',
-        'Transfer-Encoding' => 'chunked'
+        'content-type'      => 'text/json',
+        'transfer-encoding' => 'chunked'
       }
 
       def self.accepts?(env)
@@ -22,7 +22,7 @@ module WebsocketRails
         define_deferrable_callbacks
 
         origin = "#{request.protocol}#{request.raw_host_with_port}"
-        @headers.merge!({'Access-Control-Allow-Origin' => origin}) if WebsocketRails.config.allowed_origins.include?(origin)
+        @headers.merge!({'access-control-allow-origin' => origin}) if WebsocketRails.config.allowed_origins.include?(origin)
         # IE < 10.0 hack
         # XDomainRequest will not bubble up notifications of download progress in the first 2kb of the response
         # http://blogs.msdn.com/b/ieinternals/archive/2010/04/06/comet-streaming-in-internet-explorer-with-xmlhttprequest-and-xdomainrequest.aspx
