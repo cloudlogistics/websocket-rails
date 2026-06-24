@@ -22,7 +22,6 @@ Gem::Specification.new do |s|
   s.add_dependency "rack"
   s.add_dependency "faye-websocket"
   s.add_dependency "redis"
-  s.add_dependency "hiredis-client"
   s.add_dependency "em-synchrony"
   s.add_dependency "redis-objects"
   s.add_development_dependency "rake"

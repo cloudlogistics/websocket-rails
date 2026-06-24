@@ -43,15 +43,30 @@ module WebsocketRails
 
     def redis
       @redis ||= begin
-        redis_options = WebsocketRails.config.redis_options
-        EM.reactor_running? ? Redis.new(redis_options) : ruby_redis
+        if defined?(EM) && EM.reactor_running?
+          em_redis
+        else
+          ruby_redis
+        end
+      end
+    end
+
+    # Redis connection for EventMachine environments (Thin).
+    # Uses the synchrony driver when em-synchrony is available so Redis calls
+    # yield to the EM reactor instead of blocking it.
+    def em_redis
+      @em_redis ||= begin
+        options = WebsocketRails.config.redis_options.dup
+        if defined?(EM::Synchrony)
+          options[:driver] = :synchrony
+        end
+        Redis.new(options)
       end
     end
 
     def ruby_redis
       @ruby_redis ||= begin
-        redis_options = WebsocketRails.config.redis_options
-        Redis.new(redis_options)
+        Redis.new(WebsocketRails.config.redis_options)
       end
     end
 
