@@ -41,7 +41,7 @@ module WebsocketRails
     # the Development environment.
     def self.inherited(controller)
       unless controller.name == "WebsocketRails::InternalController" || Rails.version =~/^4/
-        unloadable controller
+        unloadable controller if respond_to?(:unloadable, true)
       end
     end
 

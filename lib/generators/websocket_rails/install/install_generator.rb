@@ -19,7 +19,7 @@ module WebsocketRails
         manifest = options[:manifest]
         js_path  = "app/assets/javascripts"
 
-        create_file("#{js_path}/#{manifest}") unless File.exists?("#{js_path}/#{manifest}")
+        create_file("#{js_path}/#{manifest}") unless File.exist?("#{js_path}/#{manifest}")
 
         append_to_file "#{js_path}/#{manifest}" do
           out = ""
