@@ -64,7 +64,11 @@ module WebsocketRails
             log_event(event) do
               controller = controller_factory.new_for_event(event, controller_class, method)
 
-              controller.process_action(method, event)
+              # Rails 7 moved AbstractController::Callbacks#process_action to a
+              # private method, so it can no longer be invoked with a plain
+              # external call. Use send to dispatch while preserving the
+              # callback-wrapping behavior (Callbacks#process_action -> super).
+              controller.send(:process_action, method, event)
             end
           rescue Exception => ex
             event.success = false
@@ -86,9 +90,9 @@ module WebsocketRails
             controller = controller_factory.new_for_event(event, controller_class, event.name)
             # send to the method of the event name
             # silently skip routing to the controller on event.name if it doesnt respond
-            controller.process_action(event.name, event) if controller.respond_to?(event.name)
+            controller.send(:process_action, event.name, event) if controller.respond_to?(event.name)
             # send to our defined catch all method
-            controller.process_action(catch_all, event) if catch_all
+            controller.send(:process_action, catch_all, event) if catch_all
 
           end
         rescue Exception => ex

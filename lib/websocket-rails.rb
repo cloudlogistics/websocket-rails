@@ -30,6 +30,21 @@ module WebsocketRails
     def logger
       config.logger
     end
+
+    # Log an exception from background synchronization code. Uses Rails.logger
+    # when available (so it reaches the app's log/rollbar pipeline) and never
+    # raises itself.
+    def log_error(message, error)
+      details = "[WebsocketRails] #{message}: #{error.class}: #{error.message}"
+      details << "\n" << error.backtrace.first(8).join("\n") if error.backtrace
+      if defined?(Rails) && Rails.respond_to?(:logger) && Rails.logger
+        Rails.logger.error(details)
+      else
+        warn(details)
+      end
+    rescue StandardError
+      nil
+    end
   end
 
 end

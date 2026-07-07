@@ -32,19 +32,12 @@ module WebsocketRails
     def initialize
       @connections = {}
       @dispatcher  = Dispatcher.new(self)
-
-      if WebsocketRails.synchronize?
-        if defined?(EM) && EM.reactor_running?
-          EM.next_tick do
-            Fiber.new {
-              Synchronization.synchronize!
-              EM.add_shutdown_hook { Synchronization.shutdown! }
-            }.resume
-          end
-        else
-          Rails.logger.warn "[WebsocketRails] Synchronization disabled: EventMachine reactor is not running"
-        end
-      end
+      @sync_mutex  = Mutex.new
+      # The Redis synchronization subscriber is started lazily and per-process
+      # from #call (see #ensure_thread_synchronization). It always runs in a
+      # dedicated background thread so its blocking Redis SUBSCRIBE never freezes
+      # the EventMachine reactor (Thin) or the web server, and so it survives
+      # Puma's clustered fork (threads are not inherited by forked workers).
     end
 
     def inspect
@@ -53,6 +46,8 @@ module WebsocketRails
 
     # Primary entry point for the Rack application
     def call(env)
+      ensure_thread_synchronization
+
       request = ActionDispatch::Request.new(env)
 
       if request.post?
@@ -67,6 +62,28 @@ module WebsocketRails
     end
 
     private
+
+    # Starts the Redis synchronization subscriber in a dedicated background
+    # thread. PID-guarded so each process (including each forked Puma worker,
+    # since threads do not survive fork) starts exactly one subscriber and
+    # repeated requests never spawn duplicates.
+    def ensure_thread_synchronization
+      return unless WebsocketRails.synchronize?
+      return if @sync_thread_pid == Process.pid
+
+      @sync_mutex.synchronize do
+        return if @sync_thread_pid == Process.pid
+        @sync_thread_pid = Process.pid
+        Thread.new do
+          begin
+            Synchronization.synchronize!
+          rescue => e
+            @sync_thread_pid = nil
+            WebsocketRails.log_error("synchronization thread crashed", e)
+          end
+        end
+      end
+    end
 
     def parse_incoming_event(params)
       connection = find_connection_by_id(params["client_id"])
