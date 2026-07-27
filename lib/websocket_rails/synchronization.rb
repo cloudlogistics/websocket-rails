@@ -52,16 +52,23 @@ module WebsocketRails
     end
 
     # Redis connection for EventMachine environments (Thin).
-    # Uses the synchrony driver when em-synchrony is available so Redis calls
-    # yield to the EM reactor instead of blocking it.
+    # Uses the synchrony driver only when em-synchrony is available AND hiredis
+    # is compiled/installed on the host. Falls back to pure Ruby driver otherwise.
     def em_redis
       @em_redis ||= begin
         options = WebsocketRails.config.redis_options.dup
-        if defined?(EM::Synchrony)
+        if defined?(EM::Synchrony) && hiredis_reader_available?
           options[:driver] = :synchrony
         end
         Redis.new(options)
       end
+    end
+
+    def hiredis_reader_available?
+      require 'hiredis/reader'
+      true
+    rescue LoadError
+      false
     end
 
     def ruby_redis

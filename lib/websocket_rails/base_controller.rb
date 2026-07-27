@@ -34,7 +34,7 @@ module WebsocketRails
       end
     end
 
-    include Metal
+    prepend Metal
     include AbstractController::Callbacks
 
     # Tell Rails that BaseController and children can be reloaded when in
