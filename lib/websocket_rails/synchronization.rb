@@ -114,33 +114,42 @@ module WebsocketRails
       return if @synchronizing_pid == Process.pid
       @synchronizing_pid = Process.pid
 
-      # Only take over process signal handling in the dedicated standalone
-      # websocket server, which owns its process. When websocket-rails is
-      # embedded in the main app (Thin) or running under Puma, the host server
-      # installs its own TERM/INT/QUIT handlers for graceful shutdown, so we
-      # must not clobber them; an at_exit cleanup is sufficient there.
-      if WebsocketRails.standalone?
-        trap('TERM') { Thread.new { shutdown! } }
-        trap('INT')  { Thread.new { shutdown! } }
-        trap('QUIT') { Thread.new { shutdown! } }
-      else
-        at_exit { shutdown! rescue nil }
-      end
-
-      @server_token = generate_server_token
-      register_server(@server_token)
-
-      # This method always runs inside a dedicated thread (see
-      # ConnectionManager#ensure_thread_synchronization), so the blocking Redis
-      # SUBSCRIBE below does NOT block the EventMachine reactor / web server.
-      # A subscribed connection cannot issue other commands, so it needs its own
-      # dedicated connection, separate from the one used for publishing.
-      subscriber_redis = Redis.new(WebsocketRails.config.redis_options)
-      info "Beginning Synchronization"
-      subscriber_redis.subscribe "websocket_rails.events" do |on|
-        on.message do |_, encoded_event|
-          dispatch_incoming(encoded_event)
+      begin
+        # Only take over process signal handling in the dedicated standalone
+        # websocket server, which owns its process. When websocket-rails is
+        # embedded in the main app (Thin) or running under Puma, the host server
+        # installs its own TERM/INT/QUIT handlers for graceful shutdown, so we
+        # must not clobber them; an at_exit cleanup is sufficient there.
+        if WebsocketRails.standalone?
+          trap('TERM') { Thread.new { shutdown! } }
+          trap('INT')  { Thread.new { shutdown! } }
+          trap('QUIT') { Thread.new { shutdown! } }
+        else
+          at_exit { shutdown! rescue nil }
         end
+
+        @server_token = generate_server_token
+        register_server(@server_token)
+
+        # This method always runs inside a dedicated thread (see
+        # ConnectionManager#ensure_thread_synchronization), so the blocking Redis
+        # SUBSCRIBE below does NOT block the EventMachine reactor / web server.
+        # A subscribed connection cannot issue other commands, so it needs its own
+        # dedicated connection, separate from the one used for publishing.
+        subscriber_redis = Redis.new(WebsocketRails.config.redis_options)
+        info "Beginning Synchronization"
+        subscriber_redis.subscribe "websocket_rails.events" do |on|
+          on.message do |_, encoded_event|
+            dispatch_incoming(encoded_event)
+          end
+        end
+      rescue => e
+        # Reset the PID guard so the next request can spawn a fresh subscriber
+        # thread. Without this, a Redis blip would permanently silence sync:
+        # @synchronizing_pid stays set, every subsequent synchronize! call
+        # returns immediately, and no subscriber is ever restarted.
+        @synchronizing_pid = nil
+        raise
       end
     end
 
