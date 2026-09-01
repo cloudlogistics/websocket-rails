@@ -34,15 +34,13 @@ module WebsocketRails
       end
     end
 
-    include Metal
+    prepend Metal
     include AbstractController::Callbacks
 
     # Tell Rails that BaseController and children can be reloaded when in
     # the Development environment.
+    # NOTE: `unloadable` was removed in Rails 5; Zeitwerk handles reloading in Rails 7.
     def self.inherited(controller)
-      unless controller.name == "WebsocketRails::InternalController" || Rails.version =~/^4/
-        unloadable controller if respond_to?(:unloadable, true)
-      end
     end
 
     # Tell the dispatcher to use channel filtering on specific channels.

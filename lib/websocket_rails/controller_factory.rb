@@ -68,8 +68,11 @@ module WebsocketRails
       # we don't reload our own controller as we assume it provide as 'library'
       unless controller.name == "WebsocketRails::InternalController"
         class_name = controller.name
-        filename = class_name.underscore
-        load "#{filename}.rb"
+        # Rails 7 uses the Zeitwerk autoloader: app/controllers is NOT on
+        # $LOAD_PATH, so the old `load "#{class_name.underscore}.rb"` raises
+        # "cannot load such file". Zeitwerk owns (re)loading; re-constantizing by
+        # name autoloads the current version (and picks up the freshly reloaded
+        # constant after Zeitwerk clears it on a code change).
         return class_name.constantize
       end
 

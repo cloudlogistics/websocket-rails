@@ -1,8 +1,10 @@
 require 'faye/websocket'
 require 'rack'
-require 'thin'
 
-Faye::WebSocket.load_adapter('thin')
+# Load the Thin adapter only when Thin is available (not needed under Puma)
+if defined?(Thin)
+  Faye::WebSocket.load_adapter('thin')
+end
 
 module WebsocketRails
   # The +ConnectionManager+ class implements the core Rack application that handles
@@ -11,9 +13,9 @@ module WebsocketRails
 
     include Logging
 
-    SuccessfulResponse = [200,{'Content-Type' => 'text/plain'},['success']].freeze
-    BadRequestResponse = [400,{'Content-Type' => 'text/plain'},['invalid']].freeze
-    ExceptionResponse  = [500,{'Content-Type' => 'text/plain'},['exception']].freeze
+    SuccessfulResponse = [200,{'content-type' => 'text/plain'},['success']].freeze
+    BadRequestResponse = [400,{'content-type' => 'text/plain'},['invalid']].freeze
+    ExceptionResponse  = [500,{'content-type' => 'text/plain'},['exception']].freeze
 
     # Contains a Hash of currently open connections.
     # @return [Hash]
@@ -30,15 +32,12 @@ module WebsocketRails
     def initialize
       @connections = {}
       @dispatcher  = Dispatcher.new(self)
-
-      if WebsocketRails.synchronize?
-        EM.next_tick do
-          Fiber.new {
-            Synchronization.synchronize!
-            EM.add_shutdown_hook { Synchronization.shutdown! }
-          }.resume
-        end
-      end
+      @sync_mutex  = Mutex.new
+      # The Redis synchronization subscriber is started lazily and per-process
+      # from #call (see #ensure_thread_synchronization). It always runs in a
+      # dedicated background thread so its blocking Redis SUBSCRIBE never freezes
+      # the EventMachine reactor (Thin) or the web server, and so it survives
+      # Puma's clustered fork (threads are not inherited by forked workers).
     end
 
     def inspect
@@ -47,6 +46,8 @@ module WebsocketRails
 
     # Primary entry point for the Rack application
     def call(env)
+      ensure_thread_synchronization
+
       request = ActionDispatch::Request.new(env)
 
       if request.post?
@@ -61,6 +62,28 @@ module WebsocketRails
     end
 
     private
+
+    # Starts the Redis synchronization subscriber in a dedicated background
+    # thread. PID-guarded so each process (including each forked Puma worker,
+    # since threads do not survive fork) starts exactly one subscriber and
+    # repeated requests never spawn duplicates.
+    def ensure_thread_synchronization
+      return unless WebsocketRails.synchronize?
+      return if @sync_thread_pid == Process.pid
+
+      @sync_mutex.synchronize do
+        return if @sync_thread_pid == Process.pid
+        @sync_thread_pid = Process.pid
+        Thread.new do
+          begin
+            Synchronization.synchronize!
+          rescue => e
+            @sync_thread_pid = nil
+            WebsocketRails.log_error("synchronization thread crashed", e)
+          end
+        end
+      end
+    end
 
     def parse_incoming_event(params)
       connection = find_connection_by_id(params["client_id"])

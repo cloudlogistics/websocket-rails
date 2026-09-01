@@ -1,6 +1,4 @@
 require "redis"
-require "redis/connection/synchrony"
-require "redis/connection/ruby"
 
 module WebsocketRails
   class Synchronization
@@ -45,16 +43,48 @@ module WebsocketRails
 
     def redis
       @redis ||= begin
-        redis_options = WebsocketRails.config.redis_options
-        EM.reactor_running? ? Redis.new(redis_options) : ruby_redis
+        if defined?(EM) && EM.reactor_running?
+          em_redis
+        else
+          ruby_redis
+        end
       end
+    end
+
+    # Redis connection for EventMachine environments (Thin).
+    # Uses the synchrony driver only when em-synchrony is available AND hiredis
+    # is compiled/installed on the host. Falls back to pure Ruby driver otherwise.
+    def em_redis
+      @em_redis ||= begin
+        options = WebsocketRails.config.redis_options.dup
+        if defined?(EM::Synchrony) && hiredis_reader_available?
+          options[:driver] = :synchrony
+        end
+        Redis.new(options)
+      end
+    end
+
+    def hiredis_reader_available?
+      require 'hiredis/reader'
+      true
+    rescue LoadError
+      false
     end
 
     def ruby_redis
       @ruby_redis ||= begin
-        redis_options = WebsocketRails.config.redis_options.merge(:driver => :ruby)
-        Redis.new(redis_options)
+        Redis.new(WebsocketRails.config.redis_options)
       end
+    end
+
+    # Dedicated Redis connection for the synchronization subscriber thread's
+    # control commands (server-token set membership). Built directly from
+    # config.redis_options so it is NOT affected by host apps that override
+    # #redis / #ruby_redis to return a shared connection (or a bare options
+    # Hash). Keeping it private to the subscriber thread also avoids sharing a
+    # single connection across threads, which the redis client does not support.
+    def sync_control_redis
+      @sync_control_redis ||= Redis.new(WebsocketRails.config.redis_options)
     end
 
     def publish(event)
@@ -77,58 +107,76 @@ module WebsocketRails
     end
 
     def synchronize!
-      unless @synchronizing
-        synchro = Fiber.new do
-          # since puma is EM based it requires synchrony driver to work with it
-          # while sidekiq requires hiredis driver to work with
-          if ENV['POD_TYPE'] == 'background' || Sidekiq.server?
-            # hiredis
-            fiber_redis = Redis.new(WebsocketRails.config.redis_options.merge(driver: :hiredis))
-          else
-            # synchrony
-            fiber_redis = Redis.new(WebsocketRails.config.redis_options)
+      # PID-guarded rather than a simple boolean: under Puma clustered mode the
+      # subscriber thread does not survive fork, so each worker process must be
+      # able to (re)start its own subscriber even though the singleton (and this
+      # flag) were inherited from the preloaded master.
+      return if @synchronizing_pid == Process.pid
+      @synchronizing_pid = Process.pid
+
+      begin
+        # Only take over process signal handling in the dedicated standalone
+        # websocket server, which owns its process. When websocket-rails is
+        # embedded in the main app (Thin) or running under Puma, the host server
+        # installs its own TERM/INT/QUIT handlers for graceful shutdown, so we
+        # must not clobber them; an at_exit cleanup is sufficient there.
+        if WebsocketRails.standalone?
+          trap('TERM') { Thread.new { shutdown! } }
+          trap('INT')  { Thread.new { shutdown! } }
+          trap('QUIT') { Thread.new { shutdown! } }
+        else
+          at_exit { shutdown! rescue nil }
+        end
+
+        @server_token = generate_server_token
+        register_server(@server_token)
+
+        # This method always runs inside a dedicated thread (see
+        # ConnectionManager#ensure_thread_synchronization), so the blocking Redis
+        # SUBSCRIBE below does NOT block the EventMachine reactor / web server.
+        # A subscribed connection cannot issue other commands, so it needs its own
+        # dedicated connection, separate from the one used for publishing.
+        subscriber_redis = Redis.new(WebsocketRails.config.redis_options)
+        info "Beginning Synchronization"
+        subscriber_redis.subscribe "websocket_rails.events" do |on|
+          on.message do |_, encoded_event|
+            dispatch_incoming(encoded_event)
           end
-
-          @server_token = generate_server_token
-          register_server(@server_token)
-
-          fiber_redis.subscribe "websocket_rails.events" do |on|
-
-            on.message do |_, encoded_event|
-              Rails.logger.info '$' * 100
-              Rails.logger.info 'Subscribe response'
-              Rails.logger.info '$' * 100
-              event = Event.new_from_json(encoded_event, nil)
-
-              # Do nothing if this is the server that sent this event.
-              next if event.server_token == server_token
-
-              # Ensure an event never gets triggered twice. Events added to the
-              # redis queue from other processes may not have a server token
-              # attached.
-              event.server_token = server_token if event.server_token.nil?
-
-              trigger_incoming event
-            end
-          end
-
-          info "Beginning Synchronization"
         end
-
-        @synchronizing = true
-
-        EM.next_tick { synchro.resume }
-
-        trap('TERM') do
-          Thread.new { shutdown! }
-        end
-        trap('INT') do
-          Thread.new { shutdown! }
-        end
-        trap('QUIT') do
-          Thread.new { shutdown! }
-        end
+      rescue => e
+        # Reset the PID guard so the next request can spawn a fresh subscriber
+        # thread. Without this, a Redis blip would permanently silence sync:
+        # @synchronizing_pid stays set, every subsequent synchronize! call
+        # returns immediately, and no subscriber is ever restarted.
+        @synchronizing_pid = nil
+        raise
       end
+    end
+
+    # Dispatch an event received from Redis to the local connections. Socket
+    # writes for faye-websocket connections under Thin must happen on the
+    # EventMachine reactor thread, so when a reactor is running we hop back onto
+    # it via EM.next_tick (thread-safe). Under Puma there is no reactor, so we
+    # handle it inline in the subscriber thread.
+    def dispatch_incoming(encoded_event)
+      if defined?(EM) && EM.reactor_running?
+        EM.next_tick { handle_incoming(encoded_event) }
+      else
+        handle_incoming(encoded_event)
+      end
+    end
+
+    def handle_incoming(encoded_event)
+      event = Event.new_from_json(encoded_event, nil)
+
+      # Do nothing if this is the server that sent this event.
+      return if event.server_token == server_token
+
+      # Ensure an event never gets triggered twice. Events added to the redis
+      # queue from other processes may not have a server token attached.
+      event.server_token = server_token if event.server_token.nil?
+
+      trigger_incoming event
     end
 
     def trigger_incoming(event)
@@ -149,22 +197,28 @@ module WebsocketRails
     def generate_server_token
       begin
         token = SecureRandom.urlsafe_base64
-      end while redis.sismember("websocket_rails.active_servers", token)
+      end while sync_control_redis.sismember("websocket_rails.active_servers", token)
 
       token
     end
 
     def register_server(token)
-      Fiber.new do
-        redis.sadd "websocket_rails.active_servers", token
-        info "Server Registered: #{token}"
-      end.resume
+      # sadd? avoids the Redis 5 deprecation warning for the boolean-returning
+      # sadd; the return value is unused here. Runs in the subscriber thread on a
+      # dedicated (blocking) connection.
+      sync_control_redis.sadd? "websocket_rails.active_servers", token
+      info "Server Registered: #{token}"
     end
 
     def remove_server(token)
-      ruby_redis.srem "websocket_rails.active_servers", token
+      # srem? avoids the Redis 5 deprecation warning for the boolean-returning
+      # srem; the return value is unused here.
+      sync_control_redis.srem? "websocket_rails.active_servers", token
       info "Server Removed: #{token}"
-      EM.stop
+      # Only the dedicated standalone websocket server owns its reactor and may
+      # stop it. When embedded in the main app (Thin), stopping the reactor here
+      # would take down the whole web process, so leave it running.
+      EM.stop if WebsocketRails.standalone? && defined?(EM) && EM.reactor_running?
     end
 
     def register_user(connection)

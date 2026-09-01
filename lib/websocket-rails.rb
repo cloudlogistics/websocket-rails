@@ -1,6 +1,12 @@
 require "active_support/dependencies"
 require "logger"
-require "thin"
+
+# Thin is optional; load it only when available (not needed under Puma)
+begin
+  require "thin"
+rescue LoadError
+  # running without Thin; faye-websocket will use rack hijacking
+end
 
 module WebsocketRails
 
@@ -23,6 +29,21 @@ module WebsocketRails
 
     def logger
       config.logger
+    end
+
+    # Log an exception from background synchronization code. Uses Rails.logger
+    # when available (so it reaches the app's log/rollbar pipeline) and never
+    # raises itself.
+    def log_error(message, error)
+      details = "[WebsocketRails] #{message}: #{error.class}: #{error.message}"
+      details << "\n" << error.backtrace.first(8).join("\n") if error.backtrace
+      if defined?(Rails) && Rails.respond_to?(:logger) && Rails.logger
+        Rails.logger.error(details)
+      else
+        warn(details)
+      end
+    rescue StandardError
+      nil
     end
   end
 
@@ -52,7 +73,7 @@ require 'websocket_rails/connection_adapters/web_socket'
 # Exceptions
 class WebsocketRails::InvalidConnectionError < StandardError
   def rack_response
-    [400,{'Content-Type' => 'text/plain'},['invalid connection']]
+    [400,{'content-type' => 'text/plain'},['invalid connection']]
   end
 end
 
